@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bulk vCard Generator</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.7.1/jszip.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+</head>
+<body>
+    <h1>Bulk vCard Generator</h1>
+
+    <form id="bulkForm">
+        <textarea id="contactsData" rows="20" cols="50" placeholder="Enter contacts data"></textarea><br>
+        <button type="submit">Generate vCards</button>
+    </form>
+
+    <div id="vCardData"></div>
+    <button id="downloadAllBtn" style="display: none;">Download all vCards and QR Codes</button>
+
+    <script>
+        const allVcards = [];
+        const allQrcodes = [];
+        const uploadedAssets = [];
+
+        async function getAccessToken(authCode, codeVerifier) {
+            const params = new URLSearchParams();
+            params.append('grant_type', 'authorization_code');
+            params.append('code', authCode);
+            params.append('redirect_uri', 'YOUR_REDIRECT_URI');
+            params.append('code_verifier', codeVerifier);
+
+            const response = await fetch('https://api.canva.com/rest/v1/oauth/token', {
+                method: 'POST',
+                headers: {
+                    'Authorization': 'Basic ' + btoa('YOUR_CLIENT_ID:YOUR_CLIENT_SECRET'),
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                },
+                body: params
+            });
+
+            const data = await response.json();
+            return data.access_token;
+        }
+
+        async function uploadAsset(accessToken, dataUrl, filename) {
+            const base64Response = await fetch(dataUrl);
+            const blob = await base64Response.blob();
+            const formData = new FormData();
+            formData.append('file', blob, filename);
+
+            const response = await fetch('https://api.canva.com/v1/assets', {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${accessToken}`
+                },
+                body: formData
+            });
+
+            const data = await response.json();
+            console.log('The asset reference is', data.ref);
+
+            await new Promise(resolve => setTimeout(resolve, 3000));  // Wait for the upload to complete
+            console.log('The upload is complete.');
+            return data.ref;
+        }
+
+        document.getElementById('bulkForm').addEventListener('submit', async function(event) {
+            event.preventDefault();
+
+            const contactsData = document.getElementById('contactsData').value.trim();
+            if (!contactsData) {
+                alert('Please enter contacts data.');
+                return;
+            }
+
+            const contacts = contactsData.split('\n'); // Process all lines
+
+            document.getElementById('vCardData').innerHTML = ''; // Clear previous vCards
+            allVcards.length = 0; // Clear previous vCards array
+            allQrcodes.length = 0; // Clear previous QR codes array
+            uploadedAssets.length = 0; // Clear uploaded assets array
+
+            const accessToken = await getAccessToken('AUTH_CODE_FROM_CALLBACK', 'CODE_VERIFIER_USED');
+
+            for (const [index, contact] of contacts.entries()) {
+                console.log(`Processing contact #${index + 1}: ${contact}`);
+
+                // Split the contact data and trim each entry
+                const [fullName, title, subtitle, phone, mobile, email, url] = contact.split(',').map(entry => entry.trim());
+
+                if (!fullName || !email) {
+                    console.warn(`Skipping invalid contact at line ${index + 1}: ${contact}`);
+                    continue; // Skip this contact if essential fields are missing
+                }
+
+                const vcardData = `BEGIN:VCARD
+VERSION:3.0
+FN:${fullName}
+TITLE:${title}
+ORG:${subtitle}
+TEL;TYPE=WORK,VOICE:${phone}
+TEL;TYPE=CELL,VOICE:${mobile}
+EMAIL;TYPE=PREF,INTERNET:${email}
+URL:${url}
+END:VCARD`;
+
+                // Create download link for vCard
+                const blob = new Blob([vcardData], { type: 'text/vcard;charset=utf-8' });
+                const fileUrl = URL.createObjectURL(blob);
+                const vcardLink = document.createElement('a');
+                const filename = fullName.replace(/[^a-zA-Z0-9]/g, '_'); // Remove special characters
+                vcardLink.href = fileUrl;
+                vcardLink.download = `${filename}.vcf`;
+                vcardLink.innerText = `Download vCard for ${fullName}`;
+                vcardLink.style.display = 'block'; // Display as block element
+
+                // Create a div for the QR code
+                const qrDiv = document.createElement('div');
+
+                // Generate the QR code with higher resolution
+                new QRCode(qrDiv, {
+                    text: vcardData,
+                    width: 256,  // Increased width
+                    height: 256  // Increased height
+                });
+
+                // Create a download link for the QR code image
+                const qrCanvas = qrDiv.querySelector('canvas');
+                const qrBlob = qrCanvas.toDataURL('image/png');
+                const qrLink = document.createElement('a');
+                qrLink.href = qrBlob;
+                qrLink.download = `${filename}_QR.png`;
+                qrLink.innerText = `Download QR Code for ${fullName}`;
+                qrLink.style.display = 'block'; // Display as block element
+
+                // Upload the QR code image to Canva
+                const assetRef = await uploadAsset(accessToken, qrBlob, `${filename}_QR.png`);
+                uploadedAssets.push(assetRef);
+
+                // Append name, vCard link, and QR code link
+                const nameText = document.createElement('p');
+                nameText.innerText = `Name: ${fullName}`;
+                document.getElementById('vCardData').appendChild(nameText);
+                document.getElementById('vCardData').appendChild(vcardLink);
+                document.getElementById('vCardData').appendChild(qrLink);
+
+                // Add some spacing
+                document.getElementById('vCardData').appendChild(document.createElement('br'));
+
+                // Store vCards and QR codes for zip download
+                allVcards.push({ filename: `${filename}.vcf`, content: blob });
+                allQrcodes.push({ filename: `${filename}_QR.png`, content: qrBlob });
+            }
+
+            if (allVcards.length > 0) {
+                document.getElementById('downloadAllBtn').style.display = 'block';
+            } else {
+                document.getElementById('downloadAllBtn').style.display = 'none';
+            }
+        });
+
+        document.getElementById('downloadAllBtn').addEventListener('click', function() {
+            const zip = new JSZip();
+
+            // Add vCards to the zip
+            allVcards.forEach(vcard => {
+                zip.file(vcard.filename, vcard.content);
+            });
+
+            // Add QR codes to the zip
+            allQrcodes.forEach(qrcode => {
+                zip.file(qrcode.filename, qrcode.content.split(',')[1], { base64: true });
+            });
+
+            zip.generateAsync({ type: 'blob' }).then(function(content) {
+                saveAs(content, 'vcards_and_qrcodes.zip');
+            });
+        });
+    </script>
+</body>
+</html>
